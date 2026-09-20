@@ -1,0 +1,257 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Session {
+  id                  String    @id
+  shop                String
+  state               String
+  isOnline            Boolean   @default(false)
+  scope               String?
+  expires             DateTime?
+  accessToken         String
+  userId              BigInt?
+  firstName           String?
+  lastName            String?
+  email               String?
+  accountOwner        Boolean   @default(false)
+  locale              String?
+  collaborator        Boolean?  @default(false)
+  emailVerified       Boolean?  @default(false)
+  refreshToken        String?
+  refreshTokenExpires DateTime?
+}
+
+model Shop {
+  id                      String   @id
+  domain                  String   @unique
+  installationGeneration  Int      @default(1)
+  mode                    String   @default("observation")
+  timezone                String   @default("UTC")
+  status                  String   @default("active")
+  onboardingStep          String   @default("install")
+  onboardingJson          String   @default("{}")
+  selectedProductGidsJson String   @default("[]")
+  collectionGid           String?
+  collectionNeedsReview   Boolean  @default(false)
+  createdAt               DateTime @default(now())
+}
+
+model Installation {
+  id             String    @id
+  shopId         String
+  generation     Int
+  encryptedToken String
+  scopes         String
+  installedAt    DateTime  @default(now())
+  revokedAt      DateTime?
+
+  @@unique([shopId, generation])
+}
+
+model AppUser {
+  id              String  @id
+  shopId          String
+  verifiedStaffId String
+  role            String
+  active          Boolean @default(true)
+  displayName     String  @default("")
+
+  @@unique([shopId, verifiedStaffId])
+}
+
+model ProductMapping {
+  id              String   @id
+  shopId          String
+  scope           String
+  version         String
+  status          String
+  productGidsJson String
+  collectionGid   String?
+  entriesJson     String
+  createdAt       DateTime @default(now())
+
+  @@unique([shopId, scope, version])
+}
+
+model RuleSet {
+  id           String   @id
+  shopId       String
+  scope        String
+  version      String
+  status       String
+  policyJson   String
+  createdAt    DateTime @default(now())
+
+  @@unique([shopId, scope, version])
+}
+
+model OrderRecord {
+  id                  String   @id
+  shopId              String
+  orderGid            String
+  currentSnapshotId   String?
+  currentEvaluationId String?
+  rowVersion          Int      @default(1)
+  processingState     String   @default("queued")
+  overallLabel        String?
+  uncheckedReason     String?
+  humanReview         String   @default("not_reviewed")
+  assignee            String?
+  lastEvaluatedAt     DateTime?
+  contentHash         String?
+  customerId          String?
+  lifecycle           String   @default("active")
+  displayNumber       String   @default("")
+  productSummary      String   @default("")
+  primaryReason       String?
+  issueCount          Int      @default(0)
+  snapshotRevision    Int      @default(0)
+  createdAt           DateTime @default(now())
+
+  @@unique([shopId, orderGid])
+}
+
+model OrderSnapshot {
+  id               String  @id
+  shopId           String
+  orderId          String
+  revision         Int
+  sourceHash       String
+  sourceUpdatedAt  DateTime
+  encryptedPayload String?
+
+  @@unique([orderId, revision])
+}
+
+model Evaluation {
+  id                String   @id
+  shopId            String
+  snapshotId        String
+  orderId           String
+  mappingVersion    String
+  ruleVersion       String
+  promptVersion     String
+  evaluationVersion String
+  provider          String
+  model             String?
+  state             String
+  overallLabel      String
+  uncheckedReason   String?
+  encryptedRequest  String?
+  encryptedResponse String?
+  current           Boolean  @default(false)
+  createdAt         DateTime @default(now())
+}
+
+model Finding {
+  id                 String  @id
+  shopId             String
+  evaluationId       String
+  orderId            String
+  fingerprint        String
+  checkId            String
+  reasonCode         String
+  itemRef            String?
+  sourceRefsJson     String
+  evidenceJson       String
+  method             String
+  uncertain          Boolean @default(false)
+  templateId         String
+  state              String
+  humanReview        String
+  rowVersion         Int     @default(1)
+  winningProbability Float?
+  confidence         Float?
+
+  @@unique([evaluationId, fingerprint])
+}
+
+model ReviewEvent {
+  id           String   @id
+  shopId       String
+  findingId    String?
+  orderId      String
+  actorStaffId String?
+  action       String
+  note         String?
+  timestamp    DateTime @default(now())
+}
+
+model ActionOutbox {
+  actionKey  String  @id
+  shopId     String
+  orderGid   String
+  revision   Int
+  actionType String
+  tag        String
+  state      String
+  attempts   Int     @default(0)
+  lastError  String?
+}
+
+model WebhookReceipt {
+  shopId                 String
+  installationGeneration Int
+  eventId                String
+  topic                  String
+  status                 String
+  receivedAt             DateTime @default(now())
+
+  @@unique([shopId, installationGeneration, eventId])
+}
+
+model UsageLedger {
+  id            String    @id
+  shopId        String
+  cycleId       String
+  orderGid      String
+  reservationId String
+  state         String
+  completedAt   DateTime?
+
+  @@unique([shopId, cycleId, orderGid])
+}
+
+model Subscription {
+  shopId         String   @id
+  providerId     String
+  plan           String
+  entitlement    Int
+  cycleId        String
+  cycleStart     DateTime
+  cycleEnd       DateTime
+  status         String
+  graceUntil     DateTime?
+  lastVerifiedAt DateTime?
+}
+
+model AuditEvent {
+  id           String   @id
+  shopId       String
+  actorStaffId String?
+  action       String
+  entityType   String
+  entityId     String
+  revision     Int?
+  metadataJson String   @default("{}")
+  timestamp    DateTime @default(now())
+}
+
+model Job {
+  id                     String  @id
+  type                   String
+  shopId                 String
+  installationGeneration Int
+  orderGid               String?
+  payloadJson            String  @default("{}")
+  runAfter               BigInt
+  attempts               Int     @default(0)
+  leasedUntil            BigInt?
+  status                 String
+}
