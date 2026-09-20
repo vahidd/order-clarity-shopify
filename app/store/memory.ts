@@ -250,13 +250,17 @@ export class MemoryStore {
     return row;
   }
 
-  getShop(shopId: string): ShopRow | null {
+  async getShop(shopId: string): Promise<ShopRow | null> {
     return this.shops.get(shopId) ?? null;
   }
 
-  getShopByDomain(domain: string): ShopRow | null {
+  async getShopByDomain(domain: string): Promise<ShopRow | null> {
     const id = this.shopsByDomain.get(domain);
     return id ? this.shops.get(id) ?? null : null;
+  }
+
+  async listShops(): Promise<ShopRow[]> {
+    return [...this.shops.values()];
   }
 
   createUser(row: Omit<AppUserRow, "id"> & { id?: string }): AppUserRow {
@@ -266,7 +270,7 @@ export class MemoryStore {
     return full;
   }
 
-  getUser(shopId: string, staffId: string): AppUserRow | null {
+  async getUser(shopId: string, staffId: string): Promise<AppUserRow | null> {
     return [...this.users.values()].find((u) => u.shopId === shopId && u.verifiedStaffId === staffId && u.active) ?? null;
   }
 
@@ -276,8 +280,12 @@ export class MemoryStore {
     this.queuePersist(() => this.persistMapping(mapping));
   }
 
-  activeMapping(shopId: string): MappingRow | null {
+  async activeMapping(shopId: string): Promise<MappingRow | null> {
     return this.mappings.find((m) => m.shopId === shopId && m.status === "active") ?? null;
+  }
+
+  async listMappings(shopId: string): Promise<MappingRow[]> {
+    return this.mappings.filter((m) => m.shopId === shopId);
   }
 
   upsertRules(rules: RuleRow) {
@@ -286,15 +294,19 @@ export class MemoryStore {
     this.queuePersist(() => this.persistRules(rules));
   }
 
-  activeRules(shopId: string): RuleRow | null {
+  async activeRules(shopId: string): Promise<RuleRow | null> {
     return this.rules.find((r) => r.shopId === shopId && r.status === "active") ?? null;
   }
 
-  getOrder(shopId: string, orderGid: string): OrderRow | null {
+  async listRules(shopId: string): Promise<RuleRow[]> {
+    return this.rules.filter((r) => r.shopId === shopId);
+  }
+
+  async getOrder(shopId: string, orderGid: string): Promise<OrderRow | null> {
     return [...this.orders.values()].find((o) => o.shopId === shopId && o.orderGid === orderGid) ?? null;
   }
 
-  getOrderById(shopId: string, id: string): OrderRow | null {
+  async getOrderById(shopId: string, id: string): Promise<OrderRow | null> {
     const row = this.orders.get(id);
     if (!row || row.shopId !== shopId) return null;
     return row;
@@ -304,12 +316,16 @@ export class MemoryStore {
     return `${shopId}:${generation}:${eventId}`;
   }
 
-  recordReceipt(row: WebhookReceiptRow): { duplicate: boolean } {
+  async recordReceipt(row: WebhookReceiptRow): Promise<{ duplicate: boolean }> {
     const key = this.receiptKey(row.shopId, row.installationGeneration, row.eventId);
     if (this.receipts.has(key)) return { duplicate: true };
     this.receipts.set(key, row);
     this.queuePersist(() => this.persistReceipt(row));
     return { duplicate: false };
+  }
+
+  async getReceipt(shopId: string, generation: number, eventId: string): Promise<WebhookReceiptRow | null> {
+    return this.receipts.get(this.receiptKey(shopId, generation, eventId)) ?? null;
   }
 
   enqueueJob(job: Omit<JobRecord, "id"> & { id?: string }): JobRecord {
@@ -319,14 +335,22 @@ export class MemoryStore {
     return full;
   }
 
-  nextJob(): JobRecord | null {
+  async nextJob(): Promise<JobRecord | null> {
     const now = Date.now();
-    const job = this.jobs.find((j) => j.status === "queued" && j.runAfter <= now);
+    const job = this.jobs.find(
+      (j) =>
+        (j.status === "queued" && j.runAfter <= now) ||
+        (j.status === "running" && j.leasedUntil !== null && j.leasedUntil < now),
+    );
     if (!job) return null;
     job.status = "running";
     job.leasedUntil = now + 5 * 60 * 1000;
     this.queuePersist(() => this.persistJob(job));
     return job;
+  }
+
+  async pullWork(): Promise<void> {
+    // MemoryStore is the process-local job table (demo/tests).
   }
 
   addAudit(row: Omit<AuditEventRow, "id" | "timestamp"> & { timestamp?: string }) {
@@ -422,30 +446,66 @@ export class MemoryStore {
     return full;
   }
 
-  listUsers(shopId: string): AppUserRow[] {
+  async listUsers(shopId: string): Promise<AppUserRow[]> {
     return [...this.users.values()].filter((u) => u.shopId === shopId);
   }
 
-  listOrders(shopId: string): OrderRow[] {
+  async listOrders(shopId: string): Promise<OrderRow[]> {
     return [...this.orders.values()].filter((o) => o.shopId === shopId);
   }
 
-  listFindings(shopId: string, orderId?: string): FindingRow[] {
+  async listFindings(shopId: string, orderId?: string): Promise<FindingRow[]> {
     return [...this.findings.values()].filter((f) => f.shopId === shopId && (!orderId || f.orderId === orderId));
   }
 
-  getFinding(shopId: string, id: string): FindingRow | null {
+  async getFinding(shopId: string, id: string): Promise<FindingRow | null> {
     const row = this.findings.get(id);
     if (!row || row.shopId !== shopId) return null;
     return row;
   }
 
-  getSnapshot(id: string): SnapshotRow | null {
+  async getSnapshot(id: string): Promise<SnapshotRow | null> {
     return this.snapshots.get(id) ?? null;
   }
 
-  getRule(shopId: string, id: string): RuleRow | null {
+  async listSnapshots(shopId: string): Promise<SnapshotRow[]> {
+    return [...this.snapshots.values()].filter((s) => s.shopId === shopId);
+  }
+
+  async getRule(shopId: string, id: string): Promise<RuleRow | null> {
     return this.rules.find((r) => r.shopId === shopId && r.id === id) ?? null;
+  }
+
+  async listUsage(shopId: string, cycleId?: string): Promise<UsageLedgerRow[]> {
+    return this.usage.filter((u) => u.shopId === shopId && (!cycleId || u.cycleId === cycleId));
+  }
+
+  async getUsageByReservation(reservationId: string): Promise<UsageLedgerRow | null> {
+    return this.usage.find((u) => u.reservationId === reservationId) ?? null;
+  }
+
+  async listReviewEvents(shopId: string, orderId?: string): Promise<ReviewEventRow[]> {
+    return this.reviewEvents.filter((e) => e.shopId === shopId && (!orderId || e.orderId === orderId));
+  }
+
+  async listOutbox(shopId: string): Promise<OutboxRow[]> {
+    return [...this.outbox.values()].filter((o) => o.shopId === shopId);
+  }
+
+  async getOutbox(actionKey: string): Promise<OutboxRow | null> {
+    return this.outbox.get(actionKey) ?? null;
+  }
+
+  async listEvaluations(shopId: string, orderId?: string): Promise<EvaluationRow[]> {
+    return [...this.evaluations.values()].filter((e) => e.shopId === shopId && (!orderId || e.orderId === orderId));
+  }
+
+  async listJobs(shopId?: string): Promise<JobRecord[]> {
+    return this.jobs.filter((j) => !shopId || j.shopId === shopId);
+  }
+
+  async getSubscription(shopId: string): Promise<SubscriptionRow | null> {
+    return this.subscriptions.get(shopId) ?? null;
   }
 
   protected persistChain: Promise<void> = Promise.resolve();

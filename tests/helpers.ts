@@ -35,7 +35,7 @@ export function authHeaders(shopId: string, staffId: string | null, role?: Staff
   };
 }
 
-export function prepareShop(
+export async function prepareShop(
   runtime: OrderClarityRuntime,
   domain: string,
   opts?: { entitlement?: number },
@@ -70,14 +70,17 @@ export function prepareShop(
   const mapping = familyMapping(shop.id);
   runtime.store.upsertMapping(mapping);
   runtime.store.upsertRules(familyRules(shop.id));
-  const sub = runtime.ensureSubscription(shop.id);
-  if (opts?.entitlement) sub.entitlement = opts.entitlement;
+  const sub = await runtime.ensureSubscription(shop.id);
+  if (opts?.entitlement) {
+    sub.entitlement = opts.entitlement;
+    runtime.store.saveSubscription(sub);
+  }
   return shop;
 }
 
 export async function ingest(runtime: OrderClarityRuntime, shopId: string, order: ShopifyOrder) {
   runtime.seedShopifyOrder(order);
-  const shop = runtime.store.getShop(shopId)!;
+  const shop = (await runtime.store.getShop(shopId))!;
   runtime.store.enqueueJob({
     type: "evaluate_order",
     shopId,

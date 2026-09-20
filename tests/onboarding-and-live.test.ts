@@ -100,29 +100,29 @@ describe("onboarding HTTP flow", () => {
     expect(provider.classifyCalls).toBeGreaterThan(callsBefore);
     expect(previewBody.originalNote).toContain("silver");
     expect(previewBody.findings.some((f: { reasonCode: string }) => f.reasonCode === "variant_conflict")).toBe(true);
-    expect(runtime.store.getRule(shop.id, ruleId)?.status).toBe("draft");
+    expect((await runtime.store.getRule(shop.id, ruleId))?.status).toBe("draft");
     expect(runtime.store.outbox.size).toBe(0);
-    expect(runtime.store.activeRules(shop.id)).toBeNull();
+    expect(await runtime.store.activeRules(shop.id)).toBeNull();
 
     const activate = await app.fetch(
       new Request(`http://test/api/rules/${ruleId}/activate`, { method: "POST", headers }),
     );
     expect(activate.status).toBe(200);
-    expect(runtime.store.activeRules(shop.id)?.id).toBe(ruleId);
+    expect((await runtime.store.activeRules(shop.id))?.id).toBe(ruleId);
 
     const done = await app.fetch(
       new Request("http://test/api/onboarding/activate", { method: "POST", headers }),
     );
     expect(done.status).toBe(200);
     expect((await done.json()).step).toBe("activate");
-    expect(runtime.getOnboarding({
+    expect((await runtime.getOnboarding({
       shopId: shop.id,
       shopDomain: shop.domain,
       installationGeneration: 1,
       staffId: "owner-1",
       role: "owner",
       requestId: "t",
-    }).step).toBe("activate");
+    })).step).toBe("activate");
   });
 
   it("preview uses evaluateOrder and never writes tags even in assisted review", async () => {
@@ -134,7 +134,7 @@ describe("onboarding HTTP flow", () => {
       provider,
       config: { mode: "demo", shopifySecret: "test-secret", encryptionKey: "k", allowTestAuth: true, demoLabel: true },
     });
-    const shop = prepareShop(runtime, "preview.example");
+    const shop = await prepareShop(runtime, "preview.example");
     shop.mode = "assisted_review";
     const app = createHttpApp(runtime);
     const headers = authHeaders(shop.id, `${shop.domain}-owner`);
@@ -161,7 +161,7 @@ describe("onboarding HTTP flow", () => {
     expect(body.preview).toBe(true);
     expect(body.tagsWritten).toBe(false);
     expect(shopify.tagWrites.length).toBe(0);
-    expect(runtime.store.activeRules(shop.id)?.id).not.toBe(ruleId);
+    expect((await runtime.store.activeRules(shop.id))?.id).not.toBe(ruleId);
   });
 
   it("unidentified staff cannot mutate onboarding", async () => {
@@ -171,7 +171,7 @@ describe("onboarding HTTP flow", () => {
       "x-orderclarity-test-session": JSON.stringify({ shopId: shop.id, staffId: null }),
       "content-type": "application/json",
     };
-    const auth = runtime.authenticate(new Headers(headers), new URL("http://test/api/onboarding"));
+    const auth = await runtime.authenticate(new Headers(headers), new URL("http://test/api/onboarding"));
     expect("role" in auth && auth.role).toBe("unidentified");
     const res = await app.fetch(
       new Request("http://test/api/onboarding/products", {
@@ -212,30 +212,30 @@ describe("live session tenant and Prisma persistence", () => {
     expect(shopsCalled).toEqual([shop.id]);
   });
 
-  it("ensureTenantFromSession does not default unidentified staff to owner", () => {
+  it("ensureTenantFromSession does not default unidentified staff to owner", async () => {
     const runtime = new OrderClarityRuntime();
-    const owner = runtime.ensureTenantFromSession({
+    const owner = await runtime.ensureTenantFromSession({
       shop: "owner-shop.myshopify.com",
       userId: "99",
       accountOwner: true,
     });
     expect(owner.role).toBe("owner");
-    const other = runtime.ensureTenantFromSession({
+    const other = await runtime.ensureTenantFromSession({
       shop: "owner-shop.myshopify.com",
       userId: "100",
       accountOwner: false,
     });
     expect(other.role).toBe("unidentified");
     expect(other.shopId).toBe(owner.shopId);
-    const noId = runtime.ensureTenantFromSession({ shop: "owner-shop.myshopify.com" });
+    const noId = await runtime.ensureTenantFromSession({ shop: "owner-shop.myshopify.com" });
     expect(noId.role).toBe("unidentified");
     expect(noId.staffId).toBeNull();
   });
 
   it("Shop A session cannot load Shop B via ensureTenantFromSession", async () => {
     const runtime = new OrderClarityRuntime();
-    const a = runtime.ensureTenantFromSession({ shop: "a.myshopify.com", userId: "1", accountOwner: true });
-    const b = runtime.ensureTenantFromSession({ shop: "b.myshopify.com", userId: "2", accountOwner: true });
+    const a = await runtime.ensureTenantFromSession({ shop: "a.myshopify.com", userId: "1", accountOwner: true });
+    const b = await runtime.ensureTenantFromSession({ shop: "b.myshopify.com", userId: "2", accountOwner: true });
     runtime.store.saveOrder({
       id: "order-b",
       shopId: b.shopId,
@@ -386,7 +386,7 @@ describe("live session tenant and Prisma persistence", () => {
     const orders = await db.orderRecord.findMany();
     expect(orders).toHaveLength(1);
     expect(orders[0]?.shopId).toBe(shopA.id);
-    expect(store.getOrder(shopB.id, "gid://shopify/Order/1")).toBeNull();
+    expect(await store.getOrder(shopB.id, "gid://shopify/Order/1")).toBeNull();
     expect((await db.orderSnapshot.findMany())[0]?.shopId).toBe(shopA.id);
     expect((await db.evaluation.findMany())[0]?.shopId).toBe(shopA.id);
     expect((await db.finding.findMany())[0]?.shopId).toBe(shopA.id);
@@ -394,10 +394,11 @@ describe("live session tenant and Prisma persistence", () => {
     expect((await db.usageLedger.findMany())[0]?.shopId).toBe(shopA.id);
 
     const store2 = new PrismaStore(db, "test-encryption-key-not-for-production");
-    await store2.hydrate();
-    expect(store2.getOrder(shopA.id, "gid://shopify/Order/1")?.displayNumber).toBe("#1");
-    expect(store2.getSnapshot("snap-1")?.payload?.originalNote).toContain("silver");
-    expect(store2.getOrder(shopB.id, "gid://shopify/Order/1")).toBeNull();
+    expect(store2.orders.size).toBe(0);
+    expect((await store2.getOrder(shopA.id, "gid://shopify/Order/1"))?.displayNumber).toBe("#1");
+    expect((await store2.getSnapshot("snap-1"))?.payload?.originalNote).toContain("silver");
+    expect(await store2.getOrder(shopB.id, "gid://shopify/Order/1")).toBeNull();
+    expect(store2.orders.size).toBe(0);
   });
 });
 
@@ -416,7 +417,7 @@ describe("live constructor guard", () => {
 describe("preview drives evaluateOrder", () => {
   it("does not skip the shipped evaluator", async () => {
     const runtime = new OrderClarityRuntime();
-    const shop = prepareShop(runtime, "eval.example");
+    const shop = await prepareShop(runtime, "eval.example");
     const auth = {
       shopId: shop.id,
       shopDomain: shop.domain,
@@ -454,7 +455,7 @@ describe("preview drives evaluateOrder", () => {
         paginationComplete: true,
         customerId: null,
       },
-      rules: runtime.store.getRule(shop.id, id)!,
+      rules: (await runtime.store.getRule(shop.id, id))!,
       provider: new FakeDecisionProvider(),
     });
     expect(body.providerCalled).toBe(true);

@@ -211,11 +211,9 @@ model UsageLedger {
   shopId        String
   cycleId       String
   orderGid      String
-  reservationId String
+  reservationId String    @unique
   state         String
   completedAt   DateTime?
-
-  @@unique([shopId, cycleId, orderGid])
 }
 
 model Subscription {

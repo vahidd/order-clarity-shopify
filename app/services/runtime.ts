@@ -95,15 +95,15 @@ export class OrderClarityRuntime {
     await this.store.flush();
   }
 
-  ensureTenantFromSession(session: {
+  async ensureTenantFromSession(session: {
     shop: string;
     accessToken?: string;
     userId?: string | number | bigint | null;
     accountOwner?: boolean;
     scope?: string | null;
-  }): AuthContext {
+  }): Promise<AuthContext> {
     const domain = session.shop;
-    let shop = this.store.getShopByDomain(domain);
+    let shop = await this.store.getShopByDomain(domain);
     if (!shop) {
       shop = this.store.createShop({
         domain,
@@ -111,17 +111,19 @@ export class OrderClarityRuntime {
         onboardingStep: "install",
         webhookSecret: this.config.shopifySecret,
       });
+      await this.store.flush();
     } else if (shop.status === "uninstalled") {
       shop.installationGeneration += 1;
       shop.status = "active";
       shop.onboardingStep = "install";
       this.store.saveShop(shop);
+      await this.store.flush();
     }
     const staffId =
       session.userId === undefined || session.userId === null ? null : String(session.userId);
-    let user = staffId ? this.store.getUser(shop.id, staffId) : null;
+    let user = staffId ? await this.store.getUser(shop.id, staffId) : null;
     if (staffId && !user && session.accountOwner) {
-      const existingOwner = this.store.listUsers(shop.id).find((u) => u.role === "owner" && u.active);
+      const existingOwner = (await this.store.listUsers(shop.id)).find((u) => u.role === "owner" && u.active);
       if (!existingOwner) {
         user = this.store.createUser({
           shopId: shop.id,
@@ -130,6 +132,7 @@ export class OrderClarityRuntime {
           active: true,
           displayName: "Account owner",
         });
+        await this.store.flush();
       }
     }
     const role = roleFromVerifiedStaff({
@@ -151,7 +154,7 @@ export class OrderClarityRuntime {
     return randomUUID();
   }
 
-  authenticate(headers: Headers, url: URL): AuthContext | { error: number; body: Record<string, unknown> } {
+  async authenticate(headers: Headers, url: URL): Promise<AuthContext | { error: number; body: Record<string, unknown> }> {
     const requestId = headers.get("x-request-id") || this.requestId();
     if (this.config.allowTestAuth) {
       const raw = headers.get("x-ordercclarity-test-session") || headers.get("x-ordercclarity-session");
@@ -163,9 +166,9 @@ export class OrderClarityRuntime {
           staffId: string | null;
           role?: StaffRole;
         };
-        const shop = this.store.getShop(parsed.shopId);
+        const shop = await this.store.getShop(parsed.shopId);
         if (!shop) return { error: 401, body: { error: "unauthenticated", requestId } };
-        const user = parsed.staffId ? this.store.getUser(shop.id, parsed.staffId) : null;
+        const user = parsed.staffId ? await this.store.getUser(shop.id, parsed.staffId) : null;
         const role = roleFromVerifiedStaff({
           verifiedStaffId: parsed.staffId,
           recordedRole: user?.role ?? parsed.role ?? null,
@@ -183,11 +186,11 @@ export class OrderClarityRuntime {
     const shopHeader = headers.get("x-demo-shop");
     if (this.config.mode === "demo") {
       const shop =
-        (shopHeader ? this.store.getShopByDomain(shopHeader) : null) ??
-        this.store.getShopByDomain("demo-shop.example") ??
-        [...this.store.shops.values()][0];
+        (shopHeader ? await this.store.getShopByDomain(shopHeader) : null) ??
+        (await this.store.getShopByDomain("demo-shop.example")) ??
+        (await this.store.listShops())[0];
       if (!shop) return { error: 401, body: { error: "unauthenticated", requestId } };
-      const owner = [...this.store.users.values()].find((u) => u.shopId === shop.id && u.role === "owner");
+      const owner = (await this.store.listUsers(shop.id)).find((u) => u.role === "owner");
       return {
         shopId: shop.id,
         shopDomain: shop.domain,
@@ -214,13 +217,13 @@ export class OrderClarityRuntime {
       return { status: 413, body: { error: "payload_too_large" } };
     }
     const domain = headers.get("x-shopify-shop-domain") ?? "";
-    const shop = this.store.getShopByDomain(domain);
+    const shop = await this.store.getShopByDomain(domain);
     if (!shop || shop.status === "uninstalled") {
       return { status: 200, body: { ok: true, ignored: true } };
     }
     const eventId = headers.get("x-shopify-event-id") || headers.get("x-shopify-webhook-id") || randomUUID();
     const topic = headers.get("x-shopify-topic") || "";
-    const dup = this.store.recordReceipt({
+    const dup = await this.store.recordReceipt({
       shopId: shop.id,
       installationGeneration: shop.installationGeneration,
       eventId,
@@ -295,9 +298,11 @@ export class OrderClarityRuntime {
   }
 
   async drain(max = 100): Promise<number> {
+    await this.store.flush();
+    await this.store.pullWork();
     let n = 0;
     for (let i = 0; i < max; i++) {
-      const job = this.store.nextJob();
+      const job = await this.store.nextJob();
       if (!job) break;
       await this.processJob(job);
       n += 1;
@@ -306,7 +311,7 @@ export class OrderClarityRuntime {
   }
 
   async processJob(job: JobRecord): Promise<void> {
-    const shop = this.store.getShop(job.shopId);
+    const shop = await this.store.getShop(job.shopId);
     if (!shop || shop.status === "uninstalled" || shop.installationGeneration !== job.installationGeneration) {
       job.status = "cancelled";
       this.store.saveJob(job);
@@ -333,14 +338,14 @@ export class OrderClarityRuntime {
   }
 
   async evaluateFresh(shop: ShopRow, orderGid: string, job?: JobRecord): Promise<void> {
-    const mapping = this.store.activeMapping(shop.id);
-    const rules = this.store.activeRules(shop.id);
+    const mapping = await this.store.activeMapping(shop.id);
+    const rules = await this.store.activeRules(shop.id);
     if (!mapping || !rules) return;
 
     const remote = await this.shopify.fetchOrder(shop.id, orderGid);
     if (!remote) return;
     if (remote.cancelled) {
-      const existing = this.store.getOrder(shop.id, orderGid);
+      const existing = await this.store.getOrder(shop.id, orderGid);
       if (existing) {
         existing.lifecycle = "cancelled";
         this.store.saveOrder(existing);
@@ -363,7 +368,7 @@ export class OrderClarityRuntime {
       promptVersion: PROMPT_VERSION,
     });
 
-    let order = this.store.getOrder(shop.id, orderGid);
+    let order = await this.store.getOrder(shop.id, orderGid);
     if (!order) {
       order = {
         id: randomUUID(),
@@ -396,25 +401,19 @@ export class OrderClarityRuntime {
     }
 
     const reserved = await this.store.withTx(async () => {
-      const sub = this.ensureSubscription(shop.id);
+      const sub = await this.ensureSubscription(shop.id);
       const now = new Date();
       if (sub.status === "grace" && sub.graceUntil && now.toISOString() >= sub.graceUntil) {
         sub.status = "paused";
+        this.store.saveSubscription(sub);
       }
-      const already = this.store.usage.some(
-        (u) => u.shopId === shop.id && u.cycleId === sub.cycleId && u.orderGid === orderGid && u.state === "completed",
-      );
-      const reservedExisting = this.store.usage.find(
-        (u) => u.shopId === shop.id && u.cycleId === sub.cycleId && u.orderGid === orderGid && u.state === "reserved",
-      );
+      const usage = await this.store.listUsage(shop.id, sub.cycleId);
+      const already = usage.some((u) => u.orderGid === orderGid && u.state === "completed");
+      const reservedExisting = usage.find((u) => u.orderGid === orderGid && u.state === "reserved");
       if (already) return { kind: "already" as const, reservationId: null, sub };
       if (reservedExisting) return { kind: "reserved" as const, reservationId: reservedExisting.reservationId, sub };
-      const consumed = this.store.usage.filter(
-        (u) => u.shopId === shop.id && u.cycleId === sub.cycleId && u.state === "completed",
-      ).length;
-      const held = this.store.usage.filter(
-        (u) => u.shopId === shop.id && u.cycleId === sub.cycleId && u.state === "reserved",
-      ).length;
+      const consumed = usage.filter((u) => u.state === "completed").length;
+      const held = usage.filter((u) => u.state === "reserved").length;
       const decision = canReserve(
         {
           shopId: shop.id,
@@ -492,7 +491,7 @@ export class OrderClarityRuntime {
       });
       if (latestHash !== hash) {
         if (reservationId) {
-          const row = this.store.usage.find((u) => u.reservationId === reservationId);
+          const row = await this.store.getUsageByReservation(reservationId);
           if (row && row.state === "reserved") {
             row.state = "released";
             this.store.saveUsage(row);
@@ -525,7 +524,7 @@ export class OrderClarityRuntime {
       (outcome.overallLabel === "issues" || outcome.overallLabel === "no_issue_detected");
 
     if (reservationId) {
-      const row = this.store.usage.find((u) => u.reservationId === reservationId);
+      const row = await this.store.getUsageByReservation(reservationId);
       if (row) {
         if (completeSupported && !already) {
           row.state = "completed";
@@ -538,7 +537,7 @@ export class OrderClarityRuntime {
     }
 
     if (shop.mode === "assisted_review") {
-      this.queueTags(shop, order, snapshot, outcome.overallLabel, outcome.findings.some((f) => !f.uncertain || true));
+      await this.queueTags(shop, order, snapshot, outcome.overallLabel, outcome.findings.some((f) => !f.uncertain || true));
     }
     await this.store.flush();
   }
@@ -550,8 +549,8 @@ export class OrderClarityRuntime {
     hash: string,
     outcome: Awaited<ReturnType<typeof evaluateOrder>>,
   ) {
-    for (const finding of [...this.store.findings.values()].filter(
-      (f) => f.orderId === order.id && f.shopId === shop.id && (f.state === "open" || f.state === "awaiting_customer"),
+    for (const finding of (await this.store.listFindings(shop.id, order.id)).filter(
+      (f) => f.state === "open" || f.state === "awaiting_customer",
     )) {
       finding.state = "superseded";
       this.store.saveFinding(finding);
@@ -587,8 +586,8 @@ export class OrderClarityRuntime {
       current: true,
       createdAt: this.store.now(),
     });
-    for (const ev of this.store.evaluations.values()) {
-      if (ev.orderId === order.id && ev.id !== evaluationId) {
+    for (const ev of await this.store.listEvaluations(shop.id, order.id)) {
+      if (ev.id !== evaluationId) {
         ev.current = false;
         this.store.saveEvaluation(ev);
       }
@@ -637,7 +636,7 @@ export class OrderClarityRuntime {
     this.store.saveOrder(order);
   }
 
-  queueTags(shop: ShopRow, order: OrderRow, snapshot: OrderSnapshot, label: OverallLabel, hasOpen: boolean) {
+  async queueTags(shop: ShopRow, order: OrderRow, snapshot: OrderSnapshot, label: OverallLabel, hasOpen: boolean) {
     const desired = desiredAppTags({ mode: shop.mode, overallLabel: label, hasOpenFindings: hasOpen });
     for (const tag of desired.add) {
       const key = outboxActionKey({
@@ -647,7 +646,7 @@ export class OrderClarityRuntime {
         actionType: "add",
         tag,
       });
-      if (!this.store.outbox.has(key)) {
+      if (!(await this.store.getOutbox(key))) {
         this.store.saveOutbox({
           actionKey: key,
           shopId: shop.id,
@@ -669,7 +668,7 @@ export class OrderClarityRuntime {
         actionType: "remove",
         tag,
       });
-      if (!this.store.outbox.has(key)) {
+      if (!(await this.store.getOutbox(key))) {
         this.store.saveOutbox({
           actionKey: key,
           shopId: shop.id,
@@ -697,8 +696,8 @@ export class OrderClarityRuntime {
   }
 
   async flushOutbox(shop: ShopRow) {
-    for (const row of this.store.outbox.values()) {
-      if (row.shopId !== shop.id || row.state === "succeeded") continue;
+    for (const row of await this.store.listOutbox(shop.id)) {
+      if (row.state === "succeeded") continue;
       row.attempts += 1;
       const result =
         row.actionType === "add"
@@ -715,8 +714,8 @@ export class OrderClarityRuntime {
     }
   }
 
-  ensureSubscription(shopId: string) {
-    let sub = this.store.subscriptions.get(shopId);
+  async ensureSubscription(shopId: string) {
+    let sub = await this.store.getSubscription(shopId);
     if (!sub) {
       const start = new Date();
       const end = new Date(start.getTime() + 30 * 24 * 3600 * 1000);
@@ -737,16 +736,16 @@ export class OrderClarityRuntime {
     return sub;
   }
 
-  overview(auth: AuthContext) {
-    const shop = this.store.getShop(auth.shopId);
+  async overview(auth: AuthContext) {
+    const shop = await this.store.getShop(auth.shopId);
     if (!shop) return null;
-    const orders = [...this.store.orders.values()].filter((o) => o.shopId === auth.shopId);
+    const orders = await this.store.listOrders(auth.shopId);
     const openIssues = orders.filter((o) => o.overallLabel === "issues" && o.issueCount > 0).length;
     const unchecked = orders.filter((o) => o.overallLabel === "unchecked" || o.overallLabel === "incomplete").length;
     const processing = orders.filter((o) => o.processingState === "queued" || o.processingState === "running").length;
-    const sub = this.ensureSubscription(auth.shopId);
-    const consumed = this.store.usage.filter(
-      (u) => u.shopId === auth.shopId && u.cycleId === sub.cycleId && u.state === "completed",
+    const sub = await this.ensureSubscription(auth.shopId);
+    const consumed = (await this.store.listUsage(auth.shopId, sub.cycleId)).filter(
+      (u) => u.state === "completed",
     ).length;
     return {
       demo: this.config.demoLabel || this.config.mode === "demo",
@@ -770,20 +769,19 @@ export class OrderClarityRuntime {
     };
   }
 
-  queue(auth: AuthContext, params: URLSearchParams) {
+  async queue(auth: AuthContext, params: URLSearchParams) {
     const tab = params.get("tab") || "open";
     const cursor = params.get("cursor");
     const limit = Number(params.get("limit") || QUEUE_PAGE_SIZE);
     const q = (params.get("q") || "").toLowerCase();
-    let rows = [...this.store.orders.values()].filter((o) => o.shopId === auth.shopId);
+    let rows = await this.store.listOrders(auth.shopId);
     if (q) {
       rows = rows.filter((o) => o.displayNumber.toLowerCase().includes(q) || o.productSummary.toLowerCase().includes(q));
     }
+    const findings = await this.store.listFindings(auth.shopId);
     const open = rows.filter((o) => o.overallLabel === "issues" && o.issueCount > 0);
     const unchecked = rows.filter((o) => o.overallLabel === "unchecked" || o.overallLabel === "incomplete");
-    const awaiting = rows.filter((f) =>
-      [...this.store.findings.values()].some((x) => x.orderId === f.id && x.state === "awaiting_customer"),
-    );
+    const awaiting = rows.filter((f) => findings.some((x) => x.orderId === f.id && x.state === "awaiting_customer"));
     const resolved = rows.filter((o) => o.humanReview === "reviewed");
     const noIssue = rows.filter((o) => o.overallLabel === "no_issue_detected");
 
@@ -808,13 +806,13 @@ export class OrderClarityRuntime {
         resolved: resolved.length,
         no_issue_detected: noIssue.length,
       },
-      rows: page.map((o) => this.serializeOrder(o)),
+      rows: await Promise.all(page.map((o) => this.serializeOrder(o))),
       nextCursor: next,
     };
   }
 
-  serializeOrder(o: OrderRow) {
-    const snap = o.currentSnapshotId ? this.store.snapshots.get(o.currentSnapshotId) : null;
+  async serializeOrder(o: OrderRow) {
+    const snap = o.currentSnapshotId ? await this.store.getSnapshot(o.currentSnapshotId) : null;
     const originalNote = snap?.payload?.originalNote ?? "";
     return {
       id: o.id,
@@ -836,15 +834,15 @@ export class OrderClarityRuntime {
     };
   }
 
-  orderDetail(auth: AuthContext, id: string) {
-    const order = this.store.getOrderById(auth.shopId, id) ?? this.store.getOrder(auth.shopId, id);
+  async orderDetail(auth: AuthContext, id: string) {
+    const order = (await this.store.getOrderById(auth.shopId, id)) ?? (await this.store.getOrder(auth.shopId, id));
     if (!order) return null;
-    const snap = order.currentSnapshotId ? this.store.snapshots.get(order.currentSnapshotId) : null;
-    const findings = [...this.store.findings.values()].filter((f) => f.orderId === order.id && f.shopId === auth.shopId);
-    const events = this.store.reviewEvents.filter((e) => e.orderId === order.id && e.shopId === auth.shopId);
+    const snap = order.currentSnapshotId ? await this.store.getSnapshot(order.currentSnapshotId) : null;
+    const findings = await this.store.listFindings(auth.shopId, order.id);
+    const events = await this.store.listReviewEvents(auth.shopId, order.id);
     return {
       demo: this.config.mode === "demo",
-      order: this.serializeOrder(order),
+      order: await this.serializeOrder(order),
       snapshot: snap?.payload ?? null,
       findings: findings.map((f) => ({
         ...f,
@@ -874,8 +872,8 @@ export class OrderClarityRuntime {
       return { status: 403, body: { error: "forbidden", requestId: auth.requestId } };
     }
     return this.store.withTx(async () => {
-      const finding = this.store.findings.get(findingId);
-      if (!finding || finding.shopId !== auth.shopId) {
+      const finding = await this.store.getFinding(auth.shopId, findingId);
+      if (!finding) {
         return { status: 404, body: { error: "not_found", requestId: auth.requestId } };
       }
       const isConflict =
@@ -907,11 +905,9 @@ export class OrderClarityRuntime {
         action: body.action,
         note: body.note ?? null,
       });
-      const order = this.store.orders.get(finding.orderId);
+      const order = await this.store.getOrderById(auth.shopId, finding.orderId);
       if (order && order.shopId === auth.shopId) {
-        const open = [...this.store.findings.values()].filter(
-          (f) => f.orderId === order.id && f.state === "open",
-        );
+        const open = (await this.store.listFindings(auth.shopId, order.id)).filter((f) => f.state === "open");
         order.issueCount = open.length;
         if (open.length === 0 && finding.state === "resolved") order.humanReview = "reviewed";
         order.rowVersion += 1;
@@ -935,7 +931,7 @@ export class OrderClarityRuntime {
       status: "draft",
     };
     this.store.upsertMapping(mapping);
-    const shop = this.store.getShop(auth.shopId);
+    const shop = await this.store.getShop(auth.shopId);
     if (shop) {
       shop.onboardingStep = "map_fields";
       shop.selectedProductGids = mapping.productGids.length ? mapping.productGids : shop.selectedProductGids;
@@ -947,16 +943,16 @@ export class OrderClarityRuntime {
 
   async activateRules(auth: AuthContext, ruleId: string) {
     if (!canConfigure(auth.role)) return { status: 403, body: { error: "forbidden" } };
-    const rules = this.store.rules.find((r) => r.id === ruleId && r.shopId === auth.shopId);
+    const rules = await this.store.getRule(auth.shopId, ruleId);
     if (!rules) return { status: 404, body: { error: "not_found" } };
-    const mapping = this.store.activeMapping(auth.shopId) ?? this.store.mappings.find((m) => m.shopId === auth.shopId);
+    const mapping = (await this.store.activeMapping(auth.shopId)) ?? (await this.store.listMappings(auth.shopId))[0];
     const issues = validateRuleSet(rules, mapping ?? undefined);
     if (issues.length) return { status: 400, body: { error: "conflicting_rules", issues } };
     if (rules.status === "active") {
       return { status: 409, body: { error: "immutable_active_version", message: "Activate a new version instead." } };
     }
-    for (const r of this.store.rules) {
-      if (r.shopId === auth.shopId && r.scope === rules.scope && r.status === "active" && r.id !== rules.id) {
+    for (const r of await this.store.listRules(auth.shopId)) {
+      if (r.scope === rules.scope && r.status === "active" && r.id !== rules.id) {
         r.status = "superseded";
         this.store.upsertRules(r);
       }
@@ -967,7 +963,7 @@ export class OrderClarityRuntime {
       mapping.status = "active";
       this.store.upsertMapping(mapping);
     }
-    const shop = this.store.getShop(auth.shopId);
+    const shop = await this.store.getShop(auth.shopId);
     if (shop) {
       shop.onboardingStep = "review_sample";
       this.store.saveShop(shop);
@@ -981,8 +977,8 @@ export class OrderClarityRuntime {
       revision: Number(rules.version.replace(/\D/g, "") || 1),
       metadata: { version: rules.version },
     });
-    for (const order of this.store.orders.values()) {
-      if (order.shopId === auth.shopId && order.lifecycle === "active") {
+    for (const order of await this.store.listOrders(auth.shopId)) {
+      if (order.lifecycle === "active") {
         this.store.enqueueJob({
           type: "evaluate_order",
           shopId: auth.shopId,
@@ -1002,7 +998,7 @@ export class OrderClarityRuntime {
 
   async setMode(auth: AuthContext, mode: OperatingMode, confirmedTags?: string[]) {
     if (!canConfigure(auth.role)) return { status: 403, body: { error: "forbidden" } };
-    const shop = this.store.getShop(auth.shopId);
+    const shop = await this.store.getShop(auth.shopId);
     if (!shop) return { status: 404, body: { error: "not_found" } };
     if (mode === "assisted_review") {
       const expected = [...APP_TAGS];
@@ -1036,11 +1032,11 @@ export class OrderClarityRuntime {
   }
 
   async uninstall(shopId: string) {
-    const shop = this.store.getShop(shopId);
+    const shop = await this.store.getShop(shopId);
     if (!shop) return;
     shop.status = "uninstalled";
     this.store.saveShop(shop);
-    for (const job of this.store.jobs) {
+    for (const job of await this.store.listJobs(shopId)) {
       if (job.shopId === shopId && job.status === "queued") {
         job.status = "cancelled";
         this.store.saveJob(job);
@@ -1058,33 +1054,27 @@ export class OrderClarityRuntime {
   }
 
   async redactCustomer(shopId: string, orderGids: string[]) {
-    const targets =
-      orderGids.length > 0
-        ? [...this.store.orders.values()].filter((o) => o.shopId === shopId && orderGids.includes(o.orderGid))
-        : [...this.store.orders.values()].filter((o) => o.shopId === shopId);
+    const all = await this.store.listOrders(shopId);
+    const targets = orderGids.length > 0 ? all.filter((o) => orderGids.includes(o.orderGid)) : all;
     for (const order of targets) {
       order.lifecycle = "redacted";
       order.customerId = null;
       this.store.saveOrder(order);
-      for (const snap of this.store.snapshots.values()) {
+      for (const snap of await this.store.listSnapshots(shopId)) {
         if (snap.orderId === order.id) {
           snap.payload = null;
           snap.encryptedPayload = null;
           this.store.putSnapshot(snap);
         }
       }
-      for (const ev of this.store.evaluations.values()) {
-        if (ev.orderId === order.id) {
-          ev.encryptedRequest = null;
-          ev.encryptedResponse = null;
-          this.store.saveEvaluation(ev);
-        }
+      for (const ev of await this.store.listEvaluations(shopId, order.id)) {
+        ev.encryptedRequest = null;
+        ev.encryptedResponse = null;
+        this.store.saveEvaluation(ev);
       }
-      for (const f of this.store.findings.values()) {
-        if (f.orderId === order.id) {
-          f.evidence = {};
-          this.store.saveFinding(f);
-        }
+      for (const f of await this.store.listFindings(shopId, order.id)) {
+        f.evidence = {};
+        this.store.saveFinding(f);
       }
     }
     await this.store.flush();
@@ -1094,10 +1084,10 @@ export class OrderClarityRuntime {
     await this.redactCustomer(shopId, []);
   }
 
-  usage(auth: AuthContext) {
-    const sub = this.ensureSubscription(auth.shopId);
-    const consumed = this.store.usage.filter(
-      (u) => u.shopId === auth.shopId && u.cycleId === sub.cycleId && u.state === "completed",
+  async usage(auth: AuthContext) {
+    const sub = await this.ensureSubscription(auth.shopId);
+    const consumed = (await this.store.listUsage(auth.shopId, sub.cycleId)).filter(
+      (u) => u.state === "completed",
     ).length;
     return {
       plan: sub.plan,
@@ -1111,11 +1101,12 @@ export class OrderClarityRuntime {
     };
   }
 
-  startGrace(shopId: string, from = new Date()) {
-    const sub = this.ensureSubscription(shopId);
+  async startGrace(shopId: string, from = new Date()) {
+    const sub = await this.ensureSubscription(shopId);
     const until = new Date(from.getTime() + GRACE_PERIOD_DAYS * 24 * 3600 * 1000);
     sub.status = "grace";
     sub.graceUntil = until.toISOString();
+    this.store.saveSubscription(sub);
     this.store.addAudit({
       shopId,
       actorStaffId: null,
@@ -1128,9 +1119,10 @@ export class OrderClarityRuntime {
     return sub;
   }
 
-  expireGrace(shopId: string) {
-    const sub = this.ensureSubscription(shopId);
+  async expireGrace(shopId: string) {
+    const sub = await this.ensureSubscription(shopId);
     sub.status = "paused";
+    this.store.saveSubscription(sub);
     return sub;
   }
 
@@ -1140,17 +1132,18 @@ export class OrderClarityRuntime {
     }
   }
 
-  getOnboarding(auth: AuthContext) {
-    const shop = this.store.getShop(auth.shopId);
+  async getOnboarding(auth: AuthContext) {
+    const shop = await this.store.getShop(auth.shopId);
+    const orders = (await this.store.listOrders(auth.shopId)).slice(0, 20);
     return {
       step: shop?.onboardingStep ?? "install",
       steps: ["install", "choose_products", "map_fields", "define_rules", "review_sample", "activate"] as OnboardingStep[],
       productGids: shop?.selectedProductGids ?? [],
       collectionGid: shop?.collectionGid ?? null,
       collectionNeedsReview: shop?.collectionNeedsReview ?? false,
-      mappings: this.store.mappings.filter((m) => m.shopId === auth.shopId),
-      rules: this.store.rules.filter((r) => r.shopId === auth.shopId),
-      sampleOrders: this.store.listOrders(auth.shopId).slice(0, 20).map((o) => this.serializeOrder(o)),
+      mappings: await this.store.listMappings(auth.shopId),
+      rules: await this.store.listRules(auth.shopId),
+      sampleOrders: await Promise.all(orders.map((o) => this.serializeOrder(o))),
       demo: this.config.mode === "demo",
     };
   }
@@ -1164,7 +1157,7 @@ export class OrderClarityRuntime {
     if (gids.length === 0 && !body.collectionGid) {
       return { status: 400, body: { error: "product_selection_required" } };
     }
-    const shop = this.store.getShop(auth.shopId);
+    const shop = await this.store.getShop(auth.shopId);
     if (!shop) return { status: 404, body: { error: "not_found" } };
     shop.selectedProductGids = gids;
     shop.collectionGid = body.collectionGid ?? null;
@@ -1193,11 +1186,11 @@ export class OrderClarityRuntime {
       thresholds: body.thresholds ?? { winProb: 0.9, confidence: 0.8 },
       createdAt: this.store.now(),
     };
-    const mapping = this.store.mappings.find((m) => m.shopId === auth.shopId);
+    const mapping = (await this.store.listMappings(auth.shopId))[0];
     const issues = validateRuleSet(rules, mapping);
     if (issues.length) return { status: 400, body: { error: "conflicting_rules", issues } };
     this.store.upsertRules(rules);
-    const shop = this.store.getShop(auth.shopId);
+    const shop = await this.store.getShop(auth.shopId);
     if (shop) {
       shop.onboardingStep = "define_rules";
       this.store.saveShop(shop);
@@ -1208,14 +1201,14 @@ export class OrderClarityRuntime {
 
   async previewRules(auth: AuthContext, ruleId: string, opts?: { orderGid?: string }) {
     if (!canConfigure(auth.role)) return { status: 403, body: { error: "forbidden" } };
-    const rules = this.store.getRule(auth.shopId, ruleId);
+    const rules = await this.store.getRule(auth.shopId, ruleId);
     if (!rules) return { status: 404, body: { error: "not_found" } };
     const mapping =
-      this.store.activeMapping(auth.shopId) ?? this.store.mappings.find((m) => m.shopId === auth.shopId);
+      (await this.store.activeMapping(auth.shopId)) ?? (await this.store.listMappings(auth.shopId))[0];
     if (!mapping) return { status: 400, body: { error: "mapping_required" } };
-    const shop = this.store.getShop(auth.shopId);
+    const shop = await this.store.getShop(auth.shopId);
     if (!shop) return { status: 404, body: { error: "not_found" } };
-    const outboxBefore = this.store.outbox.size;
+    const outboxBefore = (await this.store.listOutbox(auth.shopId)).length;
     const statusBefore = rules.status;
     let snapshot: OrderSnapshot | null = null;
     if (opts?.orderGid) {
@@ -1232,8 +1225,8 @@ export class OrderClarityRuntime {
       }
     }
     if (!snapshot) {
-      const existing = this.store.listOrders(auth.shopId)[0];
-      const prior = existing?.currentSnapshotId ? this.store.getSnapshot(existing.currentSnapshotId) : null;
+      const existing = (await this.store.listOrders(auth.shopId))[0];
+      const prior = existing?.currentSnapshotId ? await this.store.getSnapshot(existing.currentSnapshotId) : null;
       if (prior?.payload) {
         snapshot = { ...prior.payload, ruleVersion: rules.version, mappingVersion: mapping.version };
       }
@@ -1283,7 +1276,7 @@ export class OrderClarityRuntime {
         tagsWritten: false,
         rulesStatus: statusBefore,
         stillDraft: statusBefore !== "active",
-        outboxUnchanged: this.store.outbox.size === outboxBefore,
+        outboxUnchanged: (await this.store.listOutbox(auth.shopId)).length === outboxBefore,
         overallLabel: outcome.overallLabel,
         findings: outcome.findings,
         originalNote: snapshot.originalNote,
@@ -1299,12 +1292,12 @@ export class OrderClarityRuntime {
 
   async completeOnboarding(auth: AuthContext) {
     if (!canConfigure(auth.role)) return { status: 403, body: { error: "forbidden" } };
-    const mapping = this.store.activeMapping(auth.shopId);
-    const rules = this.store.activeRules(auth.shopId);
+    const mapping = await this.store.activeMapping(auth.shopId);
+    const rules = await this.store.activeRules(auth.shopId);
     if (!mapping || !rules) {
       return { status: 400, body: { error: "mapping_and_rules_required" } };
     }
-    const shop = this.store.getShop(auth.shopId);
+    const shop = await this.store.getShop(auth.shopId);
     if (!shop) return { status: 404, body: { error: "not_found" } };
     shop.onboardingStep = "activate";
     this.store.saveShop(shop);

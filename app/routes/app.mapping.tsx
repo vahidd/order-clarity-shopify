@@ -7,7 +7,7 @@ import { canConfigure } from "../domain/roles";
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { runtime, auth } = await embeddedAuth(request);
   return {
-    mappings: runtime.store.mappings.filter((m) => m.shopId === auth.shopId),
+    mappings: await runtime.store.listMappings(auth.shopId),
     canConfigure: canConfigure(auth.role),
   };
 };

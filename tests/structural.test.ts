@@ -44,6 +44,12 @@ describe("P0 structure", () => {
     const liveRuntime = readFileSync("app/server/live-runtime.server.ts", "utf8");
     expect(liveRuntime).toContain("PrismaStore");
     expect(liveRuntime).toContain("createLiveRuntime");
+    expect(liveRuntime).not.toMatch(/hydrate\s*\(/);
+    const embedded = readFileSync("app/server/embedded-auth.server.ts", "utf8");
+    expect(embedded).not.toMatch(/hydrate\s*\(/);
+    expect(embedded).not.toContain("pullWork");
+    const workerSrc = readFileSync("workers/index.ts", "utf8");
+    expect(workerSrc).not.toMatch(/hydrate\s*\(/);
     const ordersRoute = readFileSync("app/routes/app.orders.$id.tsx", "utf8");
     expect(ordersRoute).toContain("embeddedAuth");
     expect(ordersRoute).not.toContain("shops[0]");

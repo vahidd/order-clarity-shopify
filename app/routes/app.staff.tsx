@@ -5,7 +5,7 @@ import { embeddedAuth } from "../server/embedded-auth.server";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { runtime, auth } = await embeddedAuth(request);
-  return { users: runtime.store.listUsers(auth.shopId), role: auth.role };
+  return { users: await runtime.store.listUsers(auth.shopId), role: auth.role };
 };
 
 export default function Staff() {

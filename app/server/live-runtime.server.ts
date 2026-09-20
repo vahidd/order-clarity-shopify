@@ -38,12 +38,11 @@ async function boot(): Promise<OrderClarityRuntime> {
     import("../shopify.server"),
   ]);
   const store = new PrismaStore(prisma, config.encryptionKey);
-  await store.hydrate();
   return createLiveRuntime({
     config,
     store,
     graphqlForShop: async (shopId) => {
-      const shop = store.getShop(shopId);
+      const shop = await store.getShop(shopId);
       if (!shop) throw new Error("unknown shop for Admin GraphQL");
       const { admin } = await unauthenticated.admin(shop.domain);
       return async (query, options) => {

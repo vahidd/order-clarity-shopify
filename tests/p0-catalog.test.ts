@@ -182,7 +182,7 @@ describe("P0 detection catalog", () => {
 describe("P0 intake, review, billing", () => {
   it("T14 Duplicate webhook → one effective evaluation and usage count", async () => {
     const { runtime } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     const order = orderByNumber("thank-you-complete");
     runtime.seedShopifyOrder(order);
     const signed = signedWebhook(
@@ -201,7 +201,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T15 Reversed update delivery → freshest relevant state wins", async () => {
     const { runtime, shopify } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     const stale = shopifyOrder({
       id: "gid://shopify/Order/2001",
       number: "#2001",
@@ -231,7 +231,7 @@ describe("P0 intake, review, billing", () => {
     );
     await runtime.handleWebhook(signed.raw, signed.headers);
     await runtime.drain();
-    const stored = runtime.store.getOrder(shop.id, stale.orderGid);
+    const stored = await runtime.store.getOrder(shop.id, stale.orderGid);
     const snap = runtime.store.snapshots.get(stored!.currentSnapshotId!);
     expect(snap?.payload?.originalNote).toContain("silver");
     expect(runtime.store.findings.size).toBeGreaterThan(0);
@@ -241,7 +241,7 @@ describe("P0 intake, review, billing", () => {
     const provider = new FakeDecisionProvider();
     const shopify = new DemoShopifyAdapter();
     const { runtime } = testRuntime({ provider, shopify });
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     const order = shopifyOrder({
       id: "gid://shopify/Order/2002",
       number: "#2002",
@@ -274,10 +274,10 @@ describe("P0 intake, review, billing", () => {
       status: "queued",
     });
     await runtime.drain(1);
-    const stored = runtime.store.getOrder(shop.id, order.orderGid);
+    const stored = await runtime.store.getOrder(shop.id, order.orderGid);
     expect(stored?.currentEvaluationId).toBeNull();
     await runtime.drain(5);
-    const after = runtime.store.getOrder(shop.id, order.orderGid);
+    const after = await runtime.store.getOrder(shop.id, order.orderGid);
     const snap = after?.currentSnapshotId ? runtime.store.snapshots.get(after.currentSnapshotId) : null;
     expect(snap?.payload?.originalNote).toContain("Thanks");
     expect(after?.overallLabel).toBe("no_issue_detected");
@@ -285,7 +285,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T17 Order changed while review screen open → resolution returns conflict", async () => {
     const { runtime, app } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     const stored = await ingest(runtime, shop.id, orderByNumber("gold+silver-note"));
     const finding = [...runtime.store.findings.values()].find((f) => f.orderId === stored!.id)!;
     finding.rowVersion = 1;
@@ -309,7 +309,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T18 Two simultaneous resolutions → one succeeds and other receives stale conflict", async () => {
     const { runtime, app } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     const stored = await ingest(runtime, shop.id, orderByNumber("gold+silver-note"));
     const finding = [...runtime.store.findings.values()].find((f) => f.orderId === stored!.id)!;
     const payload = {
@@ -335,9 +335,9 @@ describe("P0 intake, review, billing", () => {
   it("T19 Provider timeout or overload → retry then Unchecked, never no issue", async () => {
     const provider = new FakeDecisionProvider(["timeout", "timeout", "timeout", "timeout", "timeout"]);
     const { runtime } = testRuntime({ provider });
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     await ingest(runtime, shop.id, orderByNumber("thank-you-complete"));
-    const stored = runtime.store.getOrder(shop.id, orderByNumber("thank-you-complete").orderGid);
+    const stored = await runtime.store.getOrder(shop.id, orderByNumber("thank-you-complete").orderGid);
     expect(stored?.overallLabel).toBe("unchecked");
     expect(stored?.uncheckedReason).toBe("unchecked_provider");
     expect(provider.attempts).toBeGreaterThanOrEqual(5);
@@ -372,7 +372,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T22 App tag update emits webhook → no evaluation loop", async () => {
     const { runtime } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     await ingest(runtime, shop.id, orderByNumber("thank-you-complete"));
     const calls = runtime.providerCalls;
     const signed = signedWebhook(
@@ -389,7 +389,7 @@ describe("P0 intake, review, billing", () => {
     shopify.mutationBlocked = false;
     shopify.tagWriteTimeoutAfterSuccess = true;
     const { runtime } = testRuntime({ shopify });
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     shop.mode = "assisted_review";
     await ingest(runtime, shop.id, orderByNumber("gold+silver-note"));
     await runtime.flushOutbox(shop);
@@ -401,8 +401,8 @@ describe("P0 intake, review, billing", () => {
 
   it("T24 Shop A requests Shop B order → no data disclosure or mutation", async () => {
     const { runtime, app } = testRuntime();
-    const a = prepareShop(runtime, "shop-a.example");
-    const b = prepareShop(runtime, "shop-b.example");
+    const a = await prepareShop(runtime, "shop-a.example");
+    const b = await prepareShop(runtime, "shop-b.example");
     const secret = await ingest(runtime, b.id, {
       ...orderByNumber("sarah-sara"),
       orderGid: "gid://shopify/Order/shop-b-secret",
@@ -420,7 +420,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T25 Forged webhook signature → rejected before enqueue", async () => {
     const { runtime } = testRuntime();
-    prepareShop(runtime, "shop-a.example");
+    await prepareShop(runtime, "shop-a.example");
     const raw = Buffer.from(JSON.stringify({ admin_graphql_api_id: "gid://shopify/Order/1", line_items: [{}] }));
     const headers = new Headers({
       "x-shopify-hmac-sha256": "forged",
@@ -436,7 +436,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T26 Viewer sends resolution request → forbidden", async () => {
     const { runtime, app } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     const stored = await ingest(runtime, shop.id, orderByNumber("gold+silver-note"));
     const finding = [...runtime.store.findings.values()].find((f) => f.orderId === stored!.id)!;
     const res = await app.fetch(
@@ -458,7 +458,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T27 Last remaining quota and concurrent orders → no over counting or hidden overage", async () => {
     const { runtime } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example", { entitlement: 1 });
+    const shop = await prepareShop(runtime, "shop-a.example", { entitlement: 1 });
     const o1 = orderByNumber("thank-you-complete");
     const o2 = {
       ...orderByNumber("jose-diacritics"),
@@ -466,7 +466,7 @@ describe("P0 intake, review, billing", () => {
     };
     runtime.seedShopifyOrder(o1);
     runtime.seedShopifyOrder(o2);
-    const shopRow = runtime.store.getShop(shop.id)!;
+    const shopRow = await runtime.store.getShop(shop.id)!;
     runtime.store.enqueueJob({
       type: "evaluate_order",
       shopId: shop.id,
@@ -498,7 +498,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T28 Same order rescanned in cycle → one completed usage charge", async () => {
     const { runtime } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     await ingest(runtime, shop.id, orderByNumber("thank-you-complete"));
     await ingest(runtime, shop.id, orderByNumber("thank-you-complete"));
     const completed = runtime.store.usage.filter((u) => u.shopId === shop.id && u.state === "completed");
@@ -508,11 +508,11 @@ describe("P0 intake, review, billing", () => {
   it("T29 Failed scan then retry succeeds → count once after completion", async () => {
     const provider = new FakeDecisionProvider(["timeout", "timeout", "timeout", "timeout", "timeout"]);
     const { runtime } = testRuntime({ provider });
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     await ingest(runtime, shop.id, orderByNumber("thank-you-complete"));
     expect(runtime.store.usage.filter((u) => u.state === "completed").length).toBe(0);
     provider.behaviors = ["ok"];
-    const row = runtime.store.getOrder(shop.id, orderByNumber("thank-you-complete").orderGid)!;
+    const row = await runtime.store.getOrder(shop.id, orderByNumber("thank-you-complete").orderGid)!;
     row.contentHash = "stale";
     await ingest(runtime, shop.id, orderByNumber("thank-you-complete"));
     expect(runtime.store.usage.filter((u) => u.shopId === shop.id && u.state === "completed").length).toBe(1);
@@ -520,10 +520,10 @@ describe("P0 intake, review, billing", () => {
 
   it("T30 Billing outage passes grace period → new scans pause and reviews remain usable", async () => {
     const { runtime, app } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     const stored = await ingest(runtime, shop.id, orderByNumber("gold+silver-note"));
-    runtime.startGrace(shop.id, new Date("2026-01-01"));
-    runtime.expireGrace(shop.id);
+    await runtime.startGrace(shop.id, new Date("2026-01-01"));
+    await runtime.expireGrace(shop.id);
     const finding = [...runtime.store.findings.values()].find((f) => f.orderId === stored!.id)!;
     const resolve = await app.fetch(
       new Request("http://test/api/findings/" + finding.id + "/resolve", {
@@ -540,7 +540,7 @@ describe("P0 intake, review, billing", () => {
     );
     expect(resolve.status).toBe(200);
     await ingest(runtime, shop.id, orderByNumber("thank-you-complete"));
-    const paused = runtime.store.getOrder(shop.id, orderByNumber("thank-you-complete").orderGid);
+    const paused = await runtime.store.getOrder(shop.id, orderByNumber("thank-you-complete").orderGid);
     expect(paused?.uncheckedReason).toBe("unchecked_plan_limit");
   });
 
@@ -548,7 +548,7 @@ describe("P0 intake, review, billing", () => {
     const provider = new FakeDecisionProvider();
     const shopify = new DemoShopifyAdapter();
     const { runtime } = testRuntime({ provider, shopify });
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     runtime.seedShopifyOrder(orderByNumber("thank-you-complete"));
     runtime.store.enqueueJob({
       type: "evaluate_order",
@@ -570,7 +570,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T32 Customer redaction → required content deleted including evaluation copies", async () => {
     const { runtime } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     const stored = await ingest(runtime, shop.id, orderByNumber("sarah-sara"));
     await runtime.redactCustomer(shop.id, [orderByNumber("sarah-sara").orderGid]);
     const snap = runtime.store.snapshots.get(stored!.currentSnapshotId!);
@@ -585,7 +585,7 @@ describe("P0 intake, review, billing", () => {
 
   it("T33 New rule version activated → current relevant orders become pending reassessment", async () => {
     const { runtime, app } = testRuntime();
-    const shop = prepareShop(runtime, "shop-a.example");
+    const shop = await prepareShop(runtime, "shop-a.example");
     await ingest(runtime, shop.id, orderByNumber("thank-you-complete"));
     const next = { ...familyRules(shop.id), id: "rules-v2", version: "2", status: "draft" as const };
     runtime.store.upsertRules(next);

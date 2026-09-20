@@ -8,7 +8,7 @@ import { canReview } from "../domain/roles";
 export const loader = async ({ request, params }: LoaderFunctionArgs) => {
   const { runtime, auth } = await embeddedAuth(request);
   if (!params.id) throw new Response("Not found", { status: 404 });
-  const detail = runtime.orderDetail(auth, params.id);
+  const detail = await runtime.orderDetail(auth, params.id);
   if (!detail) throw new Response("Not found", { status: 404 });
   return { ...detail, canMutate: canReview(auth.role), role: auth.role };
 };

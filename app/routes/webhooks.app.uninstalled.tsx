@@ -10,7 +10,7 @@ export const action = async ({ request }: ActionFunctionArgs) => {
     await db.session.deleteMany({ where: { shop } });
   }
   const runtime = await getLiveRuntime();
-  const row = runtime.store.getShopByDomain(shop);
+  const row = await runtime.store.getShopByDomain(shop);
   if (row) await runtime.uninstall(row.id);
   return new Response();
 };

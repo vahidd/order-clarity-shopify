@@ -3,7 +3,7 @@ import type { OrderClarityRuntime } from "../services/runtime";
 
 export async function seedDemo(runtime: OrderClarityRuntime, shopDomain = "demo-shop.example") {
   const shop =
-    runtime.store.getShopByDomain(shopDomain) ??
+    (await runtime.store.getShopByDomain(shopDomain)) ??
     runtime.store.createShop({
       domain: shopDomain,
       mode: "observation",
@@ -43,7 +43,7 @@ export async function seedDemo(runtime: OrderClarityRuntime, shopDomain = "demo-
   const rules = familyRules(shop.id);
   rules.status = "active";
   runtime.store.upsertRules(rules);
-  runtime.ensureSubscription(shop.id);
+  await runtime.ensureSubscription(shop.id);
 
   for (const order of scenarioOrders) {
     runtime.seedShopifyOrder(order);

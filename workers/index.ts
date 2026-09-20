@@ -13,7 +13,6 @@ async function main() {
     import("../app/shopify.server"),
   ]);
   const store = new PrismaStore(prisma, config.encryptionKey);
-  await store.hydrate();
   const runtime = createLiveRuntime({
     config,
     store,
@@ -22,7 +21,7 @@ async function main() {
       model: config.jevModel,
     }),
     graphqlForShop: async (shopId) => {
-      const shop = store.getShop(shopId);
+      const shop = await store.getShop(shopId);
       if (!shop) throw new Error("unknown shop");
       const { admin } = await unauthenticated.admin(shop.domain);
       return async (query, options) => {

@@ -8,7 +8,7 @@ const STEPS = ["install", "choose_products", "map_fields", "define_rules", "revi
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { runtime, auth } = await embeddedAuth(request);
-  return { ...runtime.getOnboarding(auth), canConfigure: canConfigure(auth.role), role: auth.role };
+  return { ...(await runtime.getOnboarding(auth)), canConfigure: canConfigure(auth.role), role: auth.role };
 };
 
 export const action = async ({ request }: ActionFunctionArgs) => {

@@ -7,7 +7,7 @@ import { canConfigure } from "../domain/roles";
 
 export const loader = async ({ request }: LoaderFunctionArgs) => {
   const { runtime, auth } = await embeddedAuth(request);
-  const shop = runtime.store.getShop(auth.shopId);
+  const shop = await runtime.store.getShop(auth.shopId);
   return { mode: shop?.mode ?? "observation", tags: APP_TAGS, canConfigure: canConfigure(auth.role), role: auth.role };
 };
 

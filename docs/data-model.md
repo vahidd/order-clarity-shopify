@@ -16,7 +16,7 @@ PostgreSQL schema: `prisma/schema.prisma` and `prisma/migrations/20260920120000_
 | ReviewEvent | Append-only |
 | ActionOutbox | Unique action key |
 | WebhookReceipt | Unique shop + generation + event ID |
-| UsageLedger | Unique shop + cycle + order |
+| UsageLedger | Unique reservationId (released + retry rows for one order may coexist; completed usage still counted once per cycle) |
 | Subscription | One current entitlement per shop |
 | AuditEvent | Append-only; no customer text |
 

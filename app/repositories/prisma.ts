@@ -247,7 +247,14 @@ function table<T extends Record<string, unknown>>(key: (row: T) => string) {
   const rows = new Map<string, T>();
   const matches = (row: T, where?: Record<string, unknown>) => {
     if (!where) return true;
-    return Object.entries(where).every(([k, v]) => (row as Record<string, unknown>)[k] === v);
+    return Object.entries(where).every(([k, v]) => {
+      if (v && typeof v === "object" && !Array.isArray(v) && !(v instanceof Date)) {
+        return Object.entries(v as Record<string, unknown>).every(
+          ([ik, iv]) => (row as Record<string, unknown>)[ik] === iv,
+        );
+      }
+      return (row as Record<string, unknown>)[k] === v;
+    });
   };
   return {
     rows,
@@ -310,8 +317,25 @@ export class PrismaStore extends MemoryStore {
     this.encryptionSecret = encryptionKey;
   }
 
+  /** Test helper only. Live web/worker reads go through Prisma accessors, not this snapshot. */
   async hydrate(): Promise<void> {
     this.skippingPersist = true;
+    this.shops.clear();
+    this.shopsByDomain.clear();
+    this.users.clear();
+    this.mappings = [];
+    this.rules = [];
+    this.orders.clear();
+    this.snapshots.clear();
+    this.evaluations.clear();
+    this.findings.clear();
+    this.usage = [];
+    this.outbox.clear();
+    this.subscriptions.clear();
+    this.jobs = [];
+    this.receipts.clear();
+    this.reviewEvents = [];
+    this.auditEvents = [];
     const shops = await this.prisma.shop.findMany();
     for (const s of shops) {
       this.shops.set(s.id, {
@@ -481,7 +505,33 @@ export class PrismaStore extends MemoryStore {
         lastVerifiedAt: s.lastVerifiedAt?.toISOString() ?? null,
       });
     }
-    this.jobs = (await this.prisma.job.findMany()).map((j) => ({
+    this.jobs = (await this.prisma.job.findMany()).map((j) => this.jobFromRecord(j));
+    for (const r of await this.prisma.webhookReceipt.findMany()) {
+      const key = this.receiptKey(r.shopId, r.installationGeneration, r.eventId);
+      this.receipts.set(key, {
+        shopId: r.shopId,
+        installationGeneration: r.installationGeneration,
+        eventId: r.eventId,
+        topic: r.topic,
+        status: r.status as WebhookReceiptRow["status"],
+        receivedAt: r.receivedAt.toISOString(),
+      });
+    }
+    this.reviewEvents = (await this.prisma.reviewEvent.findMany()).map((r) => ({
+      id: r.id,
+      shopId: r.shopId,
+      findingId: r.findingId,
+      orderId: r.orderId,
+      actorStaffId: r.actorStaffId,
+      action: r.action,
+      note: r.note,
+      timestamp: r.timestamp.toISOString(),
+    }));
+    this.skippingPersist = false;
+  }
+
+  private jobFromRecord(j: JobDbRecord): JobRecord {
+    return {
       id: j.id,
       type: j.type as JobRecord["type"],
       shopId: j.shopId,
@@ -492,8 +542,436 @@ export class PrismaStore extends MemoryStore {
       attempts: j.attempts,
       leasedUntil: j.leasedUntil === null ? null : Number(j.leasedUntil),
       status: j.status as JobRecord["status"],
+    };
+  }
+
+  private jobToRecord(job: JobRecord): JobDbRecord {
+    return {
+      id: job.id,
+      type: job.type,
+      shopId: job.shopId,
+      installationGeneration: job.installationGeneration,
+      orderGid: job.orderGid ?? null,
+      payloadJson: JSON.stringify(job.payload ?? {}),
+      runAfter: BigInt(job.runAfter),
+      attempts: job.attempts,
+      leasedUntil: job.leasedUntil === null ? null : BigInt(job.leasedUntil),
+      status: job.status,
+    };
+  }
+
+  async pullWork(): Promise<void> {
+    // Live reads go to Prisma accessors, not a RAM snapshot.
+  }
+
+  private shopFromRecord(s: ShopRecord): ShopRow {
+    return {
+      id: s.id,
+      domain: s.domain,
+      installationGeneration: s.installationGeneration,
+      mode: s.mode as ShopRow["mode"],
+      timezone: s.timezone,
+      status: s.status as ShopRow["status"],
+      onboardingStep: s.onboardingStep as ShopRow["onboardingStep"],
+      onboarding: JSON.parse(s.onboardingJson || "{}"),
+      selectedProductGids: JSON.parse(s.selectedProductGidsJson || "[]"),
+      collectionGid: s.collectionGid,
+      collectionNeedsReview: s.collectionNeedsReview,
+      webhookSecret: "",
+    };
+  }
+
+  private userFromRecord(u: UserRecord): AppUserRow {
+    return {
+      id: u.id,
+      shopId: u.shopId,
+      verifiedStaffId: u.verifiedStaffId,
+      role: u.role as AppUserRow["role"],
+      active: u.active,
+      displayName: u.displayName,
+    };
+  }
+
+  private mappingFromRecord(m: MappingRecord): MappingRow {
+    return {
+      id: m.id,
+      shopId: m.shopId,
+      scope: m.scope,
+      version: m.version,
+      status: m.status as MappingRow["status"],
+      productGids: JSON.parse(m.productGidsJson),
+      collectionGid: m.collectionGid,
+      entries: JSON.parse(m.entriesJson),
+      createdAt: m.createdAt.toISOString(),
+    };
+  }
+
+  private rulesFromRecord(r: RuleRecord): RuleRow {
+    const policy = JSON.parse(r.policyJson) as Omit<RuleRow, "id" | "shopId" | "scope" | "version" | "status" | "createdAt">;
+    return {
+      id: r.id,
+      shopId: r.shopId,
+      scope: r.scope,
+      version: r.version,
+      status: r.status as RuleRow["status"],
+      createdAt: r.createdAt.toISOString(),
+      ...policy,
+    };
+  }
+
+  private orderFromRecord(o: OrderRecord): OrderRow {
+    return {
+      id: o.id,
+      shopId: o.shopId,
+      orderGid: o.orderGid,
+      displayNumber: o.displayNumber || o.orderGid,
+      currentSnapshotId: o.currentSnapshotId,
+      currentEvaluationId: o.currentEvaluationId,
+      rowVersion: o.rowVersion,
+      processingState: o.processingState as OrderRow["processingState"],
+      overallLabel: o.overallLabel as OrderRow["overallLabel"],
+      uncheckedReason: o.uncheckedReason as OrderRow["uncheckedReason"],
+      humanReview: o.humanReview as OrderRow["humanReview"],
+      assignee: o.assignee,
+      lastEvaluatedAt: o.lastEvaluatedAt?.toISOString() ?? null,
+      contentHash: o.contentHash,
+      customerId: o.customerId,
+      lifecycle: o.lifecycle as OrderRow["lifecycle"],
+      productSummary: o.productSummary,
+      primaryReason: o.primaryReason as OrderRow["primaryReason"],
+      issueCount: o.issueCount,
+      createdAt: o.createdAt.toISOString(),
+      snapshotRevision: o.snapshotRevision,
+    };
+  }
+
+  private snapshotFromRecord(s: SnapshotRecord): SnapshotRow {
+    return {
+      id: s.id,
+      shopId: s.shopId,
+      orderId: s.orderId,
+      revision: s.revision,
+      sourceHash: s.sourceHash,
+      sourceUpdatedAt: s.sourceUpdatedAt.toISOString(),
+      encryptedPayload: s.encryptedPayload,
+      payload: s.encryptedPayload ? decryptJson(s.encryptedPayload, this.encryptionSecret) : null,
+    };
+  }
+
+  private evaluationFromRecord(e: EvaluationRecord): EvaluationRow {
+    return {
+      id: e.id,
+      shopId: e.shopId,
+      snapshotId: e.snapshotId,
+      orderId: e.orderId,
+      mappingVersion: e.mappingVersion,
+      ruleVersion: e.ruleVersion,
+      promptVersion: e.promptVersion,
+      evaluationVersion: e.evaluationVersion,
+      provider: e.provider,
+      model: e.model,
+      state: e.state as EvaluationRow["state"],
+      overallLabel: e.overallLabel as EvaluationRow["overallLabel"],
+      uncheckedReason: e.uncheckedReason as EvaluationRow["uncheckedReason"],
+      encryptedRequest: e.encryptedRequest,
+      encryptedResponse: e.encryptedResponse,
+      current: e.current,
+      createdAt: e.createdAt.toISOString(),
+    };
+  }
+
+  private findingFromRecord(f: FindingRecord): FindingRow {
+    return {
+      id: f.id,
+      shopId: f.shopId,
+      evaluationId: f.evaluationId,
+      orderId: f.orderId,
+      fingerprint: f.fingerprint,
+      checkId: f.checkId,
+      reasonCode: f.reasonCode as FindingRow["reasonCode"],
+      itemRef: f.itemRef,
+      sourceRefs: JSON.parse(f.sourceRefsJson),
+      evidence: JSON.parse(f.evidenceJson),
+      method: f.method,
+      uncertain: f.uncertain,
+      templateId: f.templateId,
+      state: f.state as FindingRow["state"],
+      humanReview: f.humanReview as FindingRow["humanReview"],
+      rowVersion: f.rowVersion,
+      winningProbability: f.winningProbability ?? undefined,
+      confidence: f.confidence ?? undefined,
+    };
+  }
+
+  private usageFromRecord(u: UsageRecord): UsageLedgerRow {
+    return {
+      id: u.id,
+      shopId: u.shopId,
+      cycleId: u.cycleId,
+      orderGid: u.orderGid,
+      reservationId: u.reservationId,
+      state: u.state as UsageLedgerRow["state"],
+      completedAt: u.completedAt?.toISOString() ?? null,
+    };
+  }
+
+  async getShop(shopId: string): Promise<ShopRow | null> {
+    await this.flush();
+    const row = await this.prisma.shop.findUnique({ where: { id: shopId } });
+    return row ? this.shopFromRecord(row) : null;
+  }
+
+  async getShopByDomain(domain: string): Promise<ShopRow | null> {
+    await this.flush();
+    const row = await this.prisma.shop.findUnique({ where: { domain } });
+    return row ? this.shopFromRecord(row) : null;
+  }
+
+  async listShops(): Promise<ShopRow[]> {
+    await this.flush();
+    return (await this.prisma.shop.findMany()).map((s) => this.shopFromRecord(s));
+  }
+
+  async getUser(shopId: string, staffId: string): Promise<AppUserRow | null> {
+    await this.flush();
+    const rows = await this.prisma.appUser.findMany({ where: { shopId, verifiedStaffId: staffId, active: true } });
+    return rows[0] ? this.userFromRecord(rows[0]) : null;
+  }
+
+  async listUsers(shopId: string): Promise<AppUserRow[]> {
+    await this.flush();
+    return (await this.prisma.appUser.findMany({ where: { shopId } })).map((u) => this.userFromRecord(u));
+  }
+
+  async activeMapping(shopId: string): Promise<MappingRow | null> {
+    await this.flush();
+    const rows = await this.prisma.productMapping.findMany({ where: { shopId, status: "active" } });
+    return rows[0] ? this.mappingFromRecord(rows[0]) : null;
+  }
+
+  async listMappings(shopId: string): Promise<MappingRow[]> {
+    await this.flush();
+    return (await this.prisma.productMapping.findMany({ where: { shopId } })).map((m) => this.mappingFromRecord(m));
+  }
+
+  async activeRules(shopId: string): Promise<RuleRow | null> {
+    await this.flush();
+    const rows = await this.prisma.ruleSet.findMany({ where: { shopId, status: "active" } });
+    return rows[0] ? this.rulesFromRecord(rows[0]) : null;
+  }
+
+  async listRules(shopId: string): Promise<RuleRow[]> {
+    await this.flush();
+    return (await this.prisma.ruleSet.findMany({ where: { shopId } })).map((r) => this.rulesFromRecord(r));
+  }
+
+  async getRule(shopId: string, id: string): Promise<RuleRow | null> {
+    await this.flush();
+    const row = await this.prisma.ruleSet.findUnique({ where: { id } });
+    if (!row || row.shopId !== shopId) return null;
+    return this.rulesFromRecord(row);
+  }
+
+  async getOrder(shopId: string, orderGid: string): Promise<OrderRow | null> {
+    await this.flush();
+    const rows = await this.prisma.orderRecord.findMany({ where: { shopId, orderGid } });
+    return rows[0] ? this.orderFromRecord(rows[0]) : null;
+  }
+
+  async getOrderById(shopId: string, id: string): Promise<OrderRow | null> {
+    await this.flush();
+    const row = await this.prisma.orderRecord.findUnique({ where: { id } });
+    if (!row || row.shopId !== shopId) return null;
+    return this.orderFromRecord(row);
+  }
+
+  async listOrders(shopId: string): Promise<OrderRow[]> {
+    await this.flush();
+    return (await this.prisma.orderRecord.findMany({ where: { shopId } })).map((o) => this.orderFromRecord(o));
+  }
+
+  async getFinding(shopId: string, id: string): Promise<FindingRow | null> {
+    await this.flush();
+    const row = await this.prisma.finding.findUnique({ where: { id } });
+    if (!row || row.shopId !== shopId) return null;
+    return this.findingFromRecord(row);
+  }
+
+  async listFindings(shopId: string, orderId?: string): Promise<FindingRow[]> {
+    await this.flush();
+    const where = orderId ? { shopId, orderId } : { shopId };
+    return (await this.prisma.finding.findMany({ where })).map((f) => this.findingFromRecord(f));
+  }
+
+  async getSnapshot(id: string): Promise<SnapshotRow | null> {
+    await this.flush();
+    const row = await this.prisma.orderSnapshot.findUnique({ where: { id } });
+    return row ? this.snapshotFromRecord(row) : null;
+  }
+
+  async listSnapshots(shopId: string): Promise<SnapshotRow[]> {
+    await this.flush();
+    return (await this.prisma.orderSnapshot.findMany({ where: { shopId } })).map((s) => this.snapshotFromRecord(s));
+  }
+
+  async listEvaluations(shopId: string, orderId?: string): Promise<EvaluationRow[]> {
+    await this.flush();
+    const where = orderId ? { shopId, orderId } : { shopId };
+    return (await this.prisma.evaluation.findMany({ where })).map((e) => this.evaluationFromRecord(e));
+  }
+
+  async listUsage(shopId: string, cycleId?: string): Promise<UsageLedgerRow[]> {
+    await this.flush();
+    const where = cycleId ? { shopId, cycleId } : { shopId };
+    return (await this.prisma.usageLedger.findMany({ where })).map((u) => this.usageFromRecord(u));
+  }
+
+  async getUsageByReservation(reservationId: string): Promise<UsageLedgerRow | null> {
+    await this.flush();
+    const rows = await this.prisma.usageLedger.findMany({ where: { reservationId } });
+    return rows[0] ? this.usageFromRecord(rows[0]) : null;
+  }
+
+  async recordReceipt(row: WebhookReceiptRow): Promise<{ duplicate: boolean }> {
+    await this.flush();
+    const existing = await this.prisma.webhookReceipt.findUnique({
+      where: {
+        shopId_installationGeneration_eventId: {
+          shopId: row.shopId,
+          installationGeneration: row.installationGeneration,
+          eventId: row.eventId,
+        },
+      },
+    });
+    if (existing) return { duplicate: true };
+    this.queuePersist(() => this.persistReceipt(row));
+    await this.flush();
+    return { duplicate: false };
+  }
+
+  async getReceipt(shopId: string, generation: number, eventId: string): Promise<WebhookReceiptRow | null> {
+    await this.flush();
+    const row = await this.prisma.webhookReceipt.findUnique({
+      where: {
+        shopId_installationGeneration_eventId: {
+          shopId,
+          installationGeneration: generation,
+          eventId,
+        },
+      },
+    });
+    if (!row) return null;
+    return {
+      shopId: row.shopId,
+      installationGeneration: row.installationGeneration,
+      eventId: row.eventId,
+      topic: row.topic,
+      status: row.status as WebhookReceiptRow["status"],
+      receivedAt: row.receivedAt.toISOString(),
+    };
+  }
+
+  async listReviewEvents(shopId: string, orderId?: string): Promise<ReviewEventRow[]> {
+    await this.flush();
+    const where = orderId ? { shopId, orderId } : { shopId };
+    return (await this.prisma.reviewEvent.findMany({ where })).map((r) => ({
+      id: r.id,
+      shopId: r.shopId,
+      findingId: r.findingId,
+      orderId: r.orderId,
+      actorStaffId: r.actorStaffId,
+      action: r.action,
+      note: r.note,
+      timestamp: r.timestamp.toISOString(),
     }));
-    this.skippingPersist = false;
+  }
+
+  async listOutbox(shopId: string): Promise<OutboxRow[]> {
+    await this.flush();
+    return (await this.prisma.actionOutbox.findMany({ where: { shopId } })).map((o) => ({
+      actionKey: o.actionKey,
+      shopId: o.shopId,
+      orderGid: o.orderGid,
+      revision: o.revision,
+      actionType: o.actionType as OutboxRow["actionType"],
+      tag: o.tag,
+      state: o.state as OutboxRow["state"],
+      attempts: o.attempts,
+      lastError: o.lastError,
+    }));
+  }
+
+  async getOutbox(actionKey: string): Promise<OutboxRow | null> {
+    await this.flush();
+    const o = await this.prisma.actionOutbox.findUnique({ where: { actionKey } });
+    if (!o) return null;
+    return {
+      actionKey: o.actionKey,
+      shopId: o.shopId,
+      orderGid: o.orderGid,
+      revision: o.revision,
+      actionType: o.actionType as OutboxRow["actionType"],
+      tag: o.tag,
+      state: o.state as OutboxRow["state"],
+      attempts: o.attempts,
+      lastError: o.lastError,
+    };
+  }
+
+  async getSubscription(shopId: string): Promise<SubscriptionRow | null> {
+    await this.flush();
+    const s = await this.prisma.subscription.findUnique({ where: { shopId } });
+    if (!s) return null;
+    return {
+      shopId: s.shopId,
+      providerId: s.providerId,
+      plan: s.plan as SubscriptionRow["plan"],
+      entitlement: s.entitlement,
+      cycleId: s.cycleId,
+      cycleStart: s.cycleStart.toISOString(),
+      cycleEnd: s.cycleEnd.toISOString(),
+      status: s.status as SubscriptionRow["status"],
+      graceUntil: s.graceUntil?.toISOString() ?? null,
+      lastVerifiedAt: s.lastVerifiedAt?.toISOString() ?? null,
+    };
+  }
+
+  async listJobs(shopId?: string): Promise<JobRecord[]> {
+    await this.flush();
+    const rows = shopId ? await this.prisma.job.findMany({ where: { shopId } }) : await this.prisma.job.findMany();
+    return rows.map((j) => this.jobFromRecord(j));
+  }
+
+  async nextJob(): Promise<JobRecord | null> {
+    await this.flush();
+    const now = Date.now();
+    const queued = await this.prisma.job.findMany({ where: { status: "queued" } });
+    const running = await this.prisma.job.findMany({ where: { status: "running" } });
+    const eligible = [...queued, ...running]
+      .filter((j) => {
+        if (j.status === "queued" && Number(j.runAfter) <= now) return true;
+        if (j.status === "running" && j.leasedUntil !== null && Number(j.leasedUntil) < now) return true;
+        return false;
+      })
+      .sort((a, b) => Number(a.runAfter) - Number(b.runAfter))[0];
+    if (!eligible) return null;
+    const latest = await this.prisma.job.findUnique({ where: { id: eligible.id } });
+    if (!latest) return null;
+    if (latest.status === "running" && latest.leasedUntil !== null && Number(latest.leasedUntil) >= now) {
+      return this.nextJob();
+    }
+    if (latest.status !== "queued" && latest.status !== "running") return this.nextJob();
+    const claimed: JobRecord = {
+      ...this.jobFromRecord(latest),
+      status: "running",
+      leasedUntil: now + 5 * 60 * 1000,
+    };
+    const data = this.jobToRecord(claimed);
+    await this.prisma.job.upsert({ where: { id: claimed.id }, create: data, update: data });
+    const idx = this.jobs.findIndex((j) => j.id === claimed.id);
+    if (idx >= 0) this.jobs[idx] = claimed;
+    else this.jobs.push(claimed);
+    return claimed;
   }
 
   protected queuePersist(fn: () => Promise<void> | void) {
@@ -691,18 +1169,7 @@ export class PrismaStore extends MemoryStore {
   }
 
   protected async persistJob(job: JobRecord) {
-    const data: JobDbRecord = {
-      id: job.id,
-      type: job.type,
-      shopId: job.shopId,
-      installationGeneration: job.installationGeneration,
-      orderGid: job.orderGid ?? null,
-      payloadJson: JSON.stringify(job.payload ?? {}),
-      runAfter: BigInt(job.runAfter),
-      attempts: job.attempts,
-      leasedUntil: job.leasedUntil === null ? null : BigInt(job.leasedUntil),
-      status: job.status,
-    };
+    const data = this.jobToRecord(job);
     await this.prisma.job.upsert({ where: { id: job.id }, create: data, update: data });
   }
 
@@ -715,15 +1182,17 @@ export class PrismaStore extends MemoryStore {
       status: row.status,
       receivedAt: new Date(row.receivedAt),
     };
-    try {
-      await this.prisma.webhookReceipt.create({ data });
-    } catch {
-      await this.prisma.webhookReceipt.upsert({
-        where: { shopId_installationGeneration_eventId: `${row.shopId}:${row.installationGeneration}:${row.eventId}` },
-        create: data,
-        update: data,
-      });
-    }
+    await this.prisma.webhookReceipt.upsert({
+      where: {
+        shopId_installationGeneration_eventId: {
+          shopId: row.shopId,
+          installationGeneration: row.installationGeneration,
+          eventId: row.eventId,
+        },
+      },
+      create: data,
+      update: data,
+    });
   }
 
   protected async persistReviewEvent(row: ReviewEventRow) {

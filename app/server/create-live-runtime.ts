@@ -17,7 +17,7 @@ export function createLiveRuntime(args: {
     shopify: new ShopifyAdminAdapter(async () => {
       throw new Error("Live ShopifyAdminAdapter requires shop-scoped Admin GraphQL");
     }, async (shopId) => {
-      const shop = args.store.getShop(shopId);
+      const shop = await args.store.getShop(shopId);
       if (shop) {
         const bound = requestGraphql.get(shop.domain);
         if (bound) return bound;

@@ -48,7 +48,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
         return json(result.status, result.body);
       }
 
-      const auth = runtime.authenticate(request.headers, url);
+      const auth = await runtime.authenticate(request.headers, url);
       if (!isAuthContext(auth)) {
         if (pathname.startsWith("/api/")) return json(auth.error, auth.body);
         if (runtime.config.mode === "demo" && pathname === "/") {
@@ -58,7 +58,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/" || pathname === "/app" || pathname === "/app/overview") {
-        const data = runtime.overview(auth);
+        const data = await runtime.overview(auth);
         if (request.headers.get("accept")?.includes("text/html") || !pathname.startsWith("/api")) {
           if (pathname === "/api/overview") {
             /* fall through */
@@ -69,18 +69,18 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/api/overview" && request.method === "GET") {
-        return json(200, runtime.overview(auth), auth.requestId);
+        return json(200, await runtime.overview(auth), auth.requestId);
       }
 
       if ((pathname === "/api/orders" || pathname === "/app/queue") && request.method === "GET") {
-        const data = runtime.queue(auth, url.searchParams);
+        const data = await runtime.queue(auth, url.searchParams);
         if (pathname === "/app/queue") return html(queueHtml(data));
         return json(200, data, auth.requestId);
       }
 
       const orderMatch = pathname.match(/^\/(api|app)\/orders\/([^/]+)$/);
       if (orderMatch && request.method === "GET") {
-        const detail = runtime.orderDetail(auth, decodeURIComponent(orderMatch[2]));
+        const detail = await runtime.orderDetail(auth, decodeURIComponent(orderMatch[2]));
         if (!detail) return json(404, { error: "not_found", requestId: auth.requestId }, auth.requestId);
         if (orderMatch[1] === "app") return html(detailHtml(detail as never));
         return json(200, detail, auth.requestId);
@@ -88,7 +88,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
 
       const recheck = pathname.match(/^\/api\/orders\/([^/]+)\/recheck$/);
       if (recheck && request.method === "POST") {
-        const order = runtime.store.getOrderById(auth.shopId, recheck[1]) ?? runtime.store.getOrder(auth.shopId, recheck[1]);
+        const order = (await runtime.store.getOrderById(auth.shopId, recheck[1])) ?? (await runtime.store.getOrder(auth.shopId, recheck[1]));
         if (!order) return json(404, { error: "not_found", requestId: auth.requestId }, auth.requestId);
         runtime.store.enqueueJob({
           type: "evaluate_order",
@@ -120,7 +120,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/api/onboarding" && request.method === "GET") {
-        return json(200, runtime.getOnboarding(auth), auth.requestId);
+        return json(200, await runtime.getOnboarding(auth), auth.requestId);
       }
 
       if (pathname === "/api/onboarding/products" && request.method === "POST") {
@@ -211,7 +211,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/api/usage" && request.method === "GET") {
-        return json(200, runtime.usage(auth), auth.requestId);
+        return json(200, await runtime.usage(auth), auth.requestId);
       }
 
       if (pathname === "/api/billing/change" && request.method === "POST") {
@@ -233,7 +233,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/app/onboarding") {
-        const data = runtime.getOnboarding(auth);
+        const data = await runtime.getOnboarding(auth);
         const current = (step: string) => (data.step === step ? " (current)" : "");
         return html(
           simplePage(
@@ -261,7 +261,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/app/mapping") {
-        const mapping = runtime.store.activeMapping(auth.shopId) ?? runtime.store.mappings.find((m) => m.shopId === auth.shopId);
+        const mapping = (await runtime.store.activeMapping(auth.shopId)) ?? (await runtime.store.listMappings(auth.shopId))[0];
         return html(
           simplePage(
             "Mapping",
@@ -280,7 +280,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/app/rules") {
-        const rules = runtime.store.rules.filter((r) => r.shopId === auth.shopId);
+        const rules = await runtime.store.listRules(auth.shopId);
         const latest = rules[rules.length - 1];
         return html(
           simplePage(
@@ -305,7 +305,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/app/billing") {
-        const usage = runtime.usage(auth);
+        const usage = await runtime.usage(auth);
         return html(
           simplePage(
             "Billing",
@@ -317,7 +317,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/app/staff") {
-        const users = [...runtime.store.users.values()].filter((u) => u.shopId === auth.shopId);
+        const users = await runtime.store.listUsers(auth.shopId);
         return html(
           simplePage(
             "Staff",
@@ -330,7 +330,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/app/settings") {
-        const shop = runtime.store.getShop(auth.shopId);
+        const shop = await runtime.store.getShop(auth.shopId);
         return html(
           simplePage(
             "Settings",
@@ -353,7 +353,7 @@ export function createHttpApp(runtime: OrderClarityRuntime) {
       }
 
       if (pathname === "/app") {
-        return html(overviewHtml(runtime.overview(auth) as Record<string, unknown>));
+        return html(overviewHtml((await runtime.overview(auth)) as Record<string, unknown>));
       }
 
       return json(404, { error: "not_found", requestId: auth.requestId }, auth.requestId);

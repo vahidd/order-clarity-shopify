@@ -23,7 +23,7 @@ export async function embeddedAuth(request: Request): Promise<{
     onlineAccessInfo?: { associated_user?: { id?: number | string; account_owner?: boolean } };
   };
   const associated = online.onlineAccessInfo?.associated_user;
-  const auth = runtime.ensureTenantFromSession({
+  const auth = await runtime.ensureTenantFromSession({
     shop: session.shop,
     accessToken: online.accessToken,
     userId: associated?.id ?? online.userId ?? null,

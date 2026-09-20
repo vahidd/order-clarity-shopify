@@ -30,7 +30,7 @@ const shopify = shopifyApp({
     afterAuth: async ({ session }) => {
       const { getLiveRuntime } = await import("./server/live-runtime.server");
       const runtime = await getLiveRuntime();
-      runtime.ensureTenantFromSession({
+      await runtime.ensureTenantFromSession({
         shop: session.shop,
         accessToken: session.accessToken,
         userId: session.userId ?? null,
